@@ -24,9 +24,11 @@ client.once('clientReady', () => {
     console.log(`Logged in as ${client.user.tag}`);
 });
 
-// 📌 COMMAND: !leavepanel
+// ✅ COMMAND HANDLER
 client.on('messageCreate', async (message) => {
-    if (message.content === '!leavepanel') {
+    if (message.author.bot) return;
+
+    if (message.content.toLowerCase() === '!leavepanel') {
 
         const button = new ButtonBuilder()
             .setCustomId('leave_start')
@@ -42,45 +44,56 @@ client.on('messageCreate', async (message) => {
     }
 });
 
-// 🔘 BUTTON CLICK
+// ✅ BUTTON SYSTEM
 client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isButton()) return;
 
     if (interaction.customId === 'leave_start') {
+
         await interaction.reply({
-            content: "Why are you leaving? Type your answer below.",
+            content: "Why are you leaving? Type your answer in chat.",
             ephemeral: true
         });
 
         const filter = (m) => m.author.id === interaction.user.id;
 
-        const collected = await interaction.channel.awaitMessages({
-            filter,
-            max: 1,
-            time: 600000
-        });
+        try {
+            const collected = await interaction.channel.awaitMessages({
+                filter,
+                max: 1,
+                time: 600000
+            });
 
-        if (!collected.size) return;
+            if (!collected.size) {
+                return interaction.followUp({
+                    content: "No response received.",
+                    ephemeral: true
+                });
+            }
 
-        const response = collected.first().content;
+            const response = collected.first().content;
 
-        const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
+            const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
 
-        await logChannel.send(
-            `📋 **Exit Survey**\n` +
-            `User: ${interaction.user.tag}\n` +
-            `ID: ${interaction.user.id}\n\n` +
-            `Response:\n${response}`
-        );
+            await logChannel.send(
+                `📋 **Exit Survey**\n` +
+                `User: ${interaction.user.tag}\n` +
+                `ID: ${interaction.user.id}\n\n` +
+                `Response:\n${response}`
+            );
 
-        // 💀 Kick user (they leave instantly)
-        const member = await interaction.guild.members.fetch(interaction.user.id);
-        await member.kick("User completed exit survey");
+            // ✅ Kick user after response
+            const member = await interaction.guild.members.fetch(interaction.user.id);
+            await member.kick("User completed exit survey");
 
-        await interaction.followUp({
-            content: "Thanks for your feedback. You have been removed from the server.",
-            ephemeral: true
-        });
+            await interaction.followUp({
+                content: "Thanks for your feedback. You have been removed from the server.",
+                ephemeral: true
+            });
+
+        } catch (err) {
+            console.log("Error collecting response:", err);
+        }
     }
 });
 
