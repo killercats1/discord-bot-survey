@@ -1,10 +1,17 @@
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const {
+    Client,
+    GatewayIntentBits,
+    Partials,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    Events
+} = require('discord.js');
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent
     ],
     partials: [Partials.Channel]
@@ -13,25 +20,41 @@ const client = new Client({
 const TOKEN = process.env.TOKEN;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 
-client.once('ready', () => {
+client.once('clientReady', () => {
     console.log(`Logged in as ${client.user.tag}`);
 });
 
-client.on('guildMemberRemove', async (member) => {
-    const user = member.user;
+// 📌 COMMAND: !leavepanel
+client.on('messageCreate', async (message) => {
+    if (message.content === '!leavepanel') {
 
-    try {
-        const dm = await user.createDM();
+        const button = new ButtonBuilder()
+            .setCustomId('leave_start')
+            .setLabel('Leave Server')
+            .setStyle(ButtonStyle.Danger);
 
-        await dm.send(
-            "Hey! We're sorry to see you go 😢\n\n" +
-            "Would you mind telling us why you left?\n" +
-            "Just reply to this message."
-        );
+        const row = new ActionRowBuilder().addComponents(button);
 
-        const filter = (msg) => msg.author.id === user.id;
+        await message.channel.send({
+            content: "Thinking about leaving? Click below to give feedback and leave:",
+            components: [row]
+        });
+    }
+});
 
-        const collected = await dm.awaitMessages({
+// 🔘 BUTTON CLICK
+client.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isButton()) return;
+
+    if (interaction.customId === 'leave_start') {
+        await interaction.reply({
+            content: "Why are you leaving? Type your answer below.",
+            ephemeral: true
+        });
+
+        const filter = (m) => m.author.id === interaction.user.id;
+
+        const collected = await interaction.channel.awaitMessages({
             filter,
             max: 1,
             time: 600000
@@ -41,27 +64,23 @@ client.on('guildMemberRemove', async (member) => {
 
         const response = collected.first().content;
 
-        const channel = await client.channels.fetch(LOG_CHANNEL_ID);
+        const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
 
-        await channel.send(
-            `📋 **Exit Survey Response**\n` +
-            `User: ${user.tag}\n` +
-            `ID: ${user.id}\n\n` +
+        await logChannel.send(
+            `📋 **Exit Survey**\n` +
+            `User: ${interaction.user.tag}\n` +
+            `ID: ${interaction.user.id}\n\n` +
             `Response:\n${response}`
         );
 
-    } catch (err) {
-        console.log("Failed to DM user");
+        // 💀 Kick user (they leave instantly)
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        await member.kick("User completed exit survey");
 
-        try {
-            const channel = await client.channels.fetch(LOG_CHANNEL_ID);
-
-            await channel.send(
-                `❌ **DM FAILED**\nUser: ${user.tag}\nID: ${user.id}`
-            );
-        } catch (e) {
-            console.log("Also failed to log.");
-        }
+        await interaction.followUp({
+            content: "Thanks for your feedback. You have been removed from the server.",
+            ephemeral: true
+        });
     }
 });
 
