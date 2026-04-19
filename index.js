@@ -53,7 +53,7 @@ const commands = [
     new SlashCommandBuilder()
         .setName('leavepanel')
         .setDescription('Post the leave server panel in this channel')
-        .setDefaultMemberPermissions('8') // Admins only (ADMINISTRATOR = 8)
+        .setDefaultMemberPermissions('8')
         .toJSON()
 ];
 
@@ -89,7 +89,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const embed = new EmbedBuilder()
             .setTitle('Leaving?')
             .setDescription("We're sorry to see you go. Click below to leave and share some quick feedback — it only takes a few seconds.")
-            .setColor(0xED4245); // Discord red
+            .setColor(0xED4245);
 
         await interaction.reply({
             embeds: [embed],
@@ -131,18 +131,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // Modal submitted → log, confirm, kick
     if (interaction.isModalSubmit() && interaction.customId === 'leave_modal') {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: 64 });
 
         const reason = interaction.fields.getTextInputValue('leave_reason');
         const improve = interaction.fields.getTextInputValue('leave_improve') || '_No response_';
 
+        // Log to the designated channel
         try {
-            // Log to the designated channel
+            console.log(`📋 Attempting to log to channel: ${LOG_CHANNEL_ID}`);
             const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
 
             const logEmbed = new EmbedBuilder()
                 .setTitle('📋 Exit Survey')
-                .setColor(0xFEE75C) // Yellow
+                .setColor(0xFEE75C)
                 .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
                 .addFields(
                     { name: 'User', value: `${interaction.user.tag}`, inline: true },
@@ -154,29 +155,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 .setTimestamp();
 
             await logChannel.send({ embeds: [logEmbed] });
+            console.log('✅ Logged successfully');
+        } catch (err) {
+            console.error('❌ Failed to log — check LOG_CHANNEL_ID and permissions:', err.message);
+        }
 
-            // Confirm to the user before kicking
+        // Kick the user regardless of whether logging succeeded
+        try {
             await interaction.editReply({
                 content: '✅ Thanks for your feedback! You will now be removed from the server.'
             });
 
-            // Small delay so user can read the confirmation
             await new Promise(r => setTimeout(r, 2000));
 
             const member = await interaction.guild.members.fetch(interaction.user.id);
             await member.kick('Exit survey completed');
-
-            console.log(`🚪 Kicked ${interaction.user.tag} (${interaction.user.id})`);
-
+            console.log(`🚪 Kicked ${interaction.user.tag}`);
         } catch (err) {
-            console.error('❌ Error during exit flow:', err);
-
-            // Let the user know something went wrong
-            try {
-                await interaction.editReply({
-                    content: '❌ Something went wrong. Please contact a server admin.'
-                });
-            } catch (_) { /* interaction may have expired */ }
+            console.error('❌ Failed to kick:', err.message);
+            await interaction.editReply({
+                content: '❌ Something went wrong. Please contact a server admin.'
+            });
         }
     }
 });
