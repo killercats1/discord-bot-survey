@@ -20,7 +20,7 @@ const http = require('http');
 const fs = require('fs');
 
 // ─── Validate environment variables on startup ───────────────────────────────
-const REQUIRED_ENV = ['TOKEN', 'CLIENT_ID'];
+const REQUIRED_ENV = ['TOKEN', 'CLIENT_ID', 'LOG_CHANNEL_ID'];
 for (const key of REQUIRED_ENV) {
     if (!process.env[key]) {
         console.error(`❌ Missing required environment variable: ${key}`);
@@ -30,6 +30,7 @@ for (const key of REQUIRED_ENV) {
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './data.json';
 
@@ -57,6 +58,51 @@ function setLogChannel(guildId, channelId) {
     if (!data[guildId]) data[guildId] = {};
     data[guildId].logChannelId = channelId;
     saveData(data);
+}
+
+// ─── Discord logger (sends to your hardcoded log channel) ────────────────────
+const logQueue = [];
+let logReady = false;
+
+async function discordLog(type, message) {
+    const entry = { type, message, timestamp: new Date() };
+
+    // Queue logs until the bot is ready
+    if (!logReady) {
+        logQueue.push(entry);
+        return;
+    }
+
+    await sendDiscordLog(entry);
+}
+
+async function sendDiscordLog({ type, message, timestamp }) {
+    try {
+        const channel = await client.channels.fetch(LOG_CHANNEL_ID);
+
+        const colors = {
+            info:    0x5865F2, // Blurple
+            success: 0x57F287, // Green
+            warning: 0xFEE75C, // Yellow
+            error:   0xED4245, // Red
+        };
+
+        const icons = {
+            info:    'ℹ️',
+            success: '✅',
+            warning: '⚠️',
+            error:   '❌',
+        };
+
+        const embed = new EmbedBuilder()
+            .setDescription(`${icons[type] || 'ℹ️'} ${message}`)
+            .setColor(colors[type] || 0x5865F2)
+            .setTimestamp(timestamp);
+
+        await channel.send({ embeds: [embed] });
+    } catch (err) {
+        console.error('Failed to send Discord log:', err.message);
+    }
 }
 
 // ─── Health check server (required by Railway) ───────────────────────────────
@@ -103,14 +149,25 @@ async function registerCommands() {
         console.log('🔄 Registering slash commands...');
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
         console.log('✅ Slash commands registered');
+        await discordLog('success', 'Slash commands registered successfully.');
     } catch (err) {
         console.error('❌ Failed to register slash commands:', err);
+        await discordLog('error', `Failed to register slash commands: ${err.message}`);
     }
 }
 
 // ─── Ready ────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
+    logReady = true;
+
+    // Flush any queued logs
+    for (const entry of logQueue) {
+        await sendDiscordLog(entry);
+    }
+    logQueue.length = 0;
+
+    await discordLog('success', `Bot online — logged in as **${client.user.tag}**`);
     await registerCommands();
 });
 
@@ -129,14 +186,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setColor(0x57F287);
 
         await interaction.reply({ embeds: [embed], ephemeral: true });
-        console.log(`⚙️ Guild ${interaction.guild.name} set log channel to #${channel.name}`);
+
+        await discordLog('info', `⚙️ **${interaction.guild.name}** set their log channel to <#${channel.id}>`);
         return;
     }
 
     // /leavepanel slash command → post the button panel
     if (interaction.isChatInputCommand() && interaction.commandName === 'leavepanel') {
-
-        // Warn if no log channel has been set up yet
         const logChannelId = getLogChannel(interaction.guild.id);
         if (!logChannelId) {
             await interaction.reply({
@@ -162,6 +218,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             embeds: [embed],
             components: [row]
         });
+
+        await discordLog('info', `📋 Leave panel posted in **${interaction.guild.name}** by ${interaction.user.tag}`);
         return;
     }
 
@@ -204,11 +262,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const improve = interaction.fields.getTextInputValue('leave_improve') || '_No response_';
         const logChannelId = getLogChannel(interaction.guild.id);
 
-        // Log to the designated channel
+        // Log exit survey to the server's designated channel
         try {
             if (!logChannelId) throw new Error('No log channel configured for this server');
 
-            console.log(`📋 Attempting to log to channel: ${logChannelId}`);
             const logChannel = await client.channels.fetch(logChannelId);
 
             const logEmbed = new EmbedBuilder()
@@ -225,12 +282,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 .setTimestamp();
 
             await logChannel.send({ embeds: [logEmbed] });
-            console.log('✅ Logged successfully');
+            console.log('✅ Exit survey logged');
         } catch (err) {
-            console.error('❌ Failed to log:', err.message);
+            console.error('❌ Failed to log exit survey:', err.message);
+            await discordLog('error', `Failed to log exit survey in **${interaction.guild.name}**: ${err.message}`);
         }
 
-        // Kick the user regardless of whether logging succeeded
+        // Kick the user
         try {
             await interaction.editReply({
                 content: '✅ Thanks for your feedback! You will now be removed from the server.'
@@ -240,9 +298,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             const member = await interaction.guild.members.fetch(interaction.user.id);
             await member.kick('Exit survey completed');
-            console.log(`🚪 Kicked ${interaction.user.tag}`);
+
+            console.log(`🚪 Kicked ${interaction.user.tag} from ${interaction.guild.name}`);
+            await discordLog('success', `🚪 **${interaction.user.tag}** was kicked from **${interaction.guild.name}**`);
         } catch (err) {
             console.error('❌ Failed to kick:', err.message);
+            await discordLog('error', `Failed to kick **${interaction.user.tag}** from **${interaction.guild.name}**: ${err.message}`);
             await interaction.editReply({
                 content: '❌ Something went wrong. Please contact a server admin.'
             });
@@ -251,14 +312,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
-process.on('SIGTERM', () => {
-    console.log('🛑 SIGTERM received — shutting down gracefully');
+process.on('SIGTERM', async () => {
+    console.log('🛑 Shutting down...');
+    await discordLog('warning', 'Bot is shutting down (SIGTERM)');
     client.destroy();
     process.exit(0);
 });
 
-process.on('SIGINT', () => {
-    console.log('🛑 SIGINT received — shutting down gracefully');
+process.on('SIGINT', async () => {
+    console.log('🛑 Shutting down...');
+    await discordLog('warning', 'Bot is shutting down (SIGINT)');
     client.destroy();
     process.exit(0);
 });
