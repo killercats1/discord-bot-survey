@@ -21,14 +21,17 @@ const TOKEN = process.env.TOKEN;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 
 client.once('clientReady', () => {
-    console.log(`Logged in as ${client.user.tag}`);
+    console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-// ✅ SIMPLE COMMAND (NO SLASH COMMANDS)
+// 🔍 MESSAGE DEBUG
 client.on('messageCreate', async (message) => {
+    console.log(`📨 Message detected: ${message.content}`);
+
     if (message.author.bot) return;
 
     if (message.content === '!leavepanel') {
+        console.log("✅ Command triggered");
 
         const button = new ButtonBuilder()
             .setCustomId('leave_start')
@@ -41,12 +44,18 @@ client.on('messageCreate', async (message) => {
             content: "Click below to leave and give feedback:",
             components: [row]
         });
+
+        console.log("✅ Button sent");
     }
 });
 
-// ✅ BUTTON HANDLER
+// 🔘 BUTTON DEBUG
 client.on(Events.InteractionCreate, async (interaction) => {
+    console.log("🔘 Interaction received");
+
     if (!interaction.isButton()) return;
+
+    console.log(`🔘 Button clicked by ${interaction.user.tag}`);
 
     if (interaction.customId === 'leave_start') {
 
@@ -54,6 +63,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             content: "Why are you leaving? Type your answer in chat.",
             ephemeral: true
         });
+
+        console.log("📝 Waiting for response...");
 
         const filter = (m) => m.author.id === interaction.user.id;
 
@@ -64,9 +75,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 time: 600000
             });
 
-            if (!collected.size) return;
+            if (!collected.size) {
+                console.log("⚠️ No response received");
+                return;
+            }
 
             const response = collected.first().content;
+            console.log(`📋 Response received: ${response}`);
 
             const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
 
@@ -74,11 +89,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 `📋 Exit Survey\nUser: ${interaction.user.tag}\nResponse:\n${response}`
             );
 
+            console.log("✅ Response sent to log channel");
+
             const member = await interaction.guild.members.fetch(interaction.user.id);
             await member.kick("Exit survey completed");
 
+            console.log("🚪 User kicked successfully");
+
         } catch (err) {
-            console.log(err);
+            console.log("❌ ERROR:", err);
         }
     }
 });
