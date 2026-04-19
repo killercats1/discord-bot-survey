@@ -12,13 +12,15 @@ const {
     Events,
     REST,
     Routes,
-    SlashCommandBuilder
+    SlashCommandBuilder,
+    ChannelType
 } = require('discord.js');
 
 const http = require('http');
+const fs = require('fs');
 
 // ─── Validate environment variables on startup ───────────────────────────────
-const REQUIRED_ENV = ['TOKEN', 'LOG_CHANNEL_ID', 'CLIENT_ID'];
+const REQUIRED_ENV = ['TOKEN', 'CLIENT_ID'];
 for (const key of REQUIRED_ENV) {
     if (!process.env[key]) {
         console.error(`❌ Missing required environment variable: ${key}`);
@@ -27,9 +29,35 @@ for (const key of REQUIRED_ENV) {
 }
 
 const TOKEN = process.env.TOKEN;
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 const CLIENT_ID = process.env.CLIENT_ID;
 const PORT = process.env.PORT || 3000;
+const DATA_FILE = './data.json';
+
+// ─── Per-guild data storage ───────────────────────────────────────────────────
+function loadData() {
+    if (!fs.existsSync(DATA_FILE)) return {};
+    try {
+        return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    } catch {
+        return {};
+    }
+}
+
+function saveData(data) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+function getLogChannel(guildId) {
+    const data = loadData();
+    return data[guildId]?.logChannelId || null;
+}
+
+function setLogChannel(guildId, channelId) {
+    const data = loadData();
+    if (!data[guildId]) data[guildId] = {};
+    data[guildId].logChannelId = channelId;
+    saveData(data);
+}
 
 // ─── Health check server (required by Railway) ───────────────────────────────
 http.createServer((req, res) => {
@@ -54,6 +82,18 @@ const commands = [
         .setName('leavepanel')
         .setDescription('Post the leave server panel in this channel')
         .setDefaultMemberPermissions('8')
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('setup')
+        .setDescription('Set the log channel for exit surveys')
+        .setDefaultMemberPermissions('8')
+        .addChannelOption(option =>
+            option
+                .setName('channel')
+                .setDescription('The channel to log exit surveys to')
+                .addChannelTypes(ChannelType.GuildText)
+                .setRequired(true)
+        )
         .toJSON()
 ];
 
@@ -77,8 +117,35 @@ client.once('ready', async () => {
 // ─── Interactions ─────────────────────────────────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
 
+    // /setup command → save log channel for this server
+    if (interaction.isChatInputCommand() && interaction.commandName === 'setup') {
+        const channel = interaction.options.getChannel('channel');
+
+        setLogChannel(interaction.guild.id, channel.id);
+
+        const embed = new EmbedBuilder()
+            .setTitle('✅ Setup Complete')
+            .setDescription(`Exit survey logs will now be sent to ${channel}.`)
+            .setColor(0x57F287);
+
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+        console.log(`⚙️ Guild ${interaction.guild.name} set log channel to #${channel.name}`);
+        return;
+    }
+
     // /leavepanel slash command → post the button panel
     if (interaction.isChatInputCommand() && interaction.commandName === 'leavepanel') {
+
+        // Warn if no log channel has been set up yet
+        const logChannelId = getLogChannel(interaction.guild.id);
+        if (!logChannelId) {
+            await interaction.reply({
+                content: '⚠️ No log channel set! Run `/setup` first to choose where exit surveys are logged.',
+                ephemeral: true
+            });
+            return;
+        }
+
         const button = new ButtonBuilder()
             .setCustomId('leave_start')
             .setLabel('🚪 Leave Server')
@@ -135,11 +202,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const reason = interaction.fields.getTextInputValue('leave_reason');
         const improve = interaction.fields.getTextInputValue('leave_improve') || '_No response_';
+        const logChannelId = getLogChannel(interaction.guild.id);
 
         // Log to the designated channel
         try {
-            console.log(`📋 Attempting to log to channel: ${LOG_CHANNEL_ID}`);
-            const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
+            if (!logChannelId) throw new Error('No log channel configured for this server');
+
+            console.log(`📋 Attempting to log to channel: ${logChannelId}`);
+            const logChannel = await client.channels.fetch(logChannelId);
 
             const logEmbed = new EmbedBuilder()
                 .setTitle('📋 Exit Survey')
@@ -157,7 +227,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await logChannel.send({ embeds: [logEmbed] });
             console.log('✅ Logged successfully');
         } catch (err) {
-            console.error('❌ Failed to log — check LOG_CHANNEL_ID and permissions:', err.message);
+            console.error('❌ Failed to log:', err.message);
         }
 
         // Kick the user regardless of whether logging succeeded
