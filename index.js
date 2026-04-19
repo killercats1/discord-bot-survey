@@ -5,101 +5,194 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    Events
+    ModalBuilder,
+    TextInputBuilder,
+    TextInputStyle,
+    EmbedBuilder,
+    Events,
+    REST,
+    Routes,
+    SlashCommandBuilder
 } = require('discord.js');
 
+const http = require('http');
+
+// ─── Validate environment variables on startup ───────────────────────────────
+const REQUIRED_ENV = ['TOKEN', 'LOG_CHANNEL_ID', 'CLIENT_ID'];
+for (const key of REQUIRED_ENV) {
+    if (!process.env[key]) {
+        console.error(`❌ Missing required environment variable: ${key}`);
+        process.exit(1);
+    }
+}
+
+const TOKEN = process.env.TOKEN;
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+const CLIENT_ID = process.env.CLIENT_ID;
+const PORT = process.env.PORT || 3000;
+
+// ─── Health check server (required by Railway) ───────────────────────────────
+http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('OK');
+}).listen(PORT, () => {
+    console.log(`🌐 Health check server listening on port ${PORT}`);
+});
+
+// ─── Discord client ───────────────────────────────────────────────────────────
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
     ],
     partials: [Partials.Channel]
 });
 
-const TOKEN = process.env.TOKEN;
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+// ─── Register slash commands ──────────────────────────────────────────────────
+const commands = [
+    new SlashCommandBuilder()
+        .setName('leavepanel')
+        .setDescription('Post the leave server panel in this channel')
+        .setDefaultMemberPermissions('8') // Admins only (ADMINISTRATOR = 8)
+        .toJSON()
+];
 
-client.once('ready', () => {
+async function registerCommands() {
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    try {
+        console.log('🔄 Registering slash commands...');
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log('✅ Slash commands registered');
+    } catch (err) {
+        console.error('❌ Failed to register slash commands:', err);
+    }
+}
+
+// ─── Ready ────────────────────────────────────────────────────────────────────
+client.once('ready', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
+    await registerCommands();
 });
 
-client.on('messageCreate', async (message) => {
-    console.log(`📨 Message detected: ${message.content}`);
+// ─── Interactions ─────────────────────────────────────────────────────────────
+client.on(Events.InteractionCreate, async (interaction) => {
 
-    if (message.author.bot) return;
-
-    if (message.content.toLowerCase() === '!leavepanel') {
-        console.log('✅ Command triggered');
-
+    // /leavepanel slash command → post the button panel
+    if (interaction.isChatInputCommand() && interaction.commandName === 'leavepanel') {
         const button = new ButtonBuilder()
             .setCustomId('leave_start')
-            .setLabel('Leave Server')
+            .setLabel('🚪 Leave Server')
             .setStyle(ButtonStyle.Danger);
 
         const row = new ActionRowBuilder().addComponents(button);
 
-        await message.channel.send({
-            content: 'Click below to leave and give feedback:',
+        const embed = new EmbedBuilder()
+            .setTitle('Leaving?')
+            .setDescription("We're sorry to see you go. Click below to leave and share some quick feedback — it only takes a few seconds.")
+            .setColor(0xED4245); // Discord red
+
+        await interaction.reply({
+            embeds: [embed],
             components: [row]
         });
-
-        console.log('✅ Button sent');
+        return;
     }
-});
 
-client.on(Events.InteractionCreate, async (interaction) => {
-    console.log('🔘 Interaction received');
+    // Leave button → open a modal
+    if (interaction.isButton() && interaction.customId === 'leave_start') {
+        const modal = new ModalBuilder()
+            .setCustomId('leave_modal')
+            .setTitle('Quick Exit Survey');
 
-    if (!interaction.isButton()) return;
+        const reasonInput = new TextInputBuilder()
+            .setCustomId('leave_reason')
+            .setLabel('Why are you leaving?')
+            .setStyle(TextInputStyle.Paragraph)
+            .setPlaceholder('Be as honest as you like — this helps us improve.')
+            .setRequired(true)
+            .setMaxLength(1000);
 
-    console.log(`🔘 Button clicked by ${interaction.user.tag}`);
+        const improveInput = new TextInputBuilder()
+            .setCustomId('leave_improve')
+            .setLabel('What could we have done better?')
+            .setStyle(TextInputStyle.Paragraph)
+            .setPlaceholder('Optional — any feedback is appreciated.')
+            .setRequired(false)
+            .setMaxLength(1000);
 
-    if (interaction.customId === 'leave_start') {
-        await interaction.reply({
-            content: 'Why are you leaving? Type your answer in chat.',
-            ephemeral: true
-        });
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(reasonInput),
+            new ActionRowBuilder().addComponents(improveInput)
+        );
 
-        console.log('📝 Waiting for response...');
+        await interaction.showModal(modal);
+        return;
+    }
 
-        const filter = (m) => m.author.id === interaction.user.id;
+    // Modal submitted → log, confirm, kick
+    if (interaction.isModalSubmit() && interaction.customId === 'leave_modal') {
+        await interaction.deferReply({ ephemeral: true });
+
+        const reason = interaction.fields.getTextInputValue('leave_reason');
+        const improve = interaction.fields.getTextInputValue('leave_improve') || '_No response_';
 
         try {
-            const collected = await interaction.channel.awaitMessages({
-                filter,
-                max: 1,
-                time: 600000
-            });
-
-            if (!collected.size) {
-                console.log('⚠️ No response received');
-                return;
-            }
-
-            const response = collected.first().content;
-            console.log(`📋 Response received: ${response}`);
-
+            // Log to the designated channel
             const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
 
-            await logChannel.send(
-                `📋 **Exit Survey**\n` +
-                `User: ${interaction.user.tag}\n` +
-                `ID: ${interaction.user.id}\n\n` +
-                `Response:\n${response}`
-            );
+            const logEmbed = new EmbedBuilder()
+                .setTitle('📋 Exit Survey')
+                .setColor(0xFEE75C) // Yellow
+                .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
+                .addFields(
+                    { name: 'User', value: `${interaction.user.tag}`, inline: true },
+                    { name: 'ID', value: `\`${interaction.user.id}\``, inline: true },
+                    { name: 'Server', value: interaction.guild.name, inline: true },
+                    { name: '❓ Why leaving?', value: reason },
+                    { name: '💡 What could be better?', value: improve }
+                )
+                .setTimestamp();
 
-            console.log('✅ Response sent to log channel');
+            await logChannel.send({ embeds: [logEmbed] });
+
+            // Confirm to the user before kicking
+            await interaction.editReply({
+                content: '✅ Thanks for your feedback! You will now be removed from the server.'
+            });
+
+            // Small delay so user can read the confirmation
+            await new Promise(r => setTimeout(r, 2000));
 
             const member = await interaction.guild.members.fetch(interaction.user.id);
             await member.kick('Exit survey completed');
 
-            console.log('🚪 User kicked successfully');
+            console.log(`🚪 Kicked ${interaction.user.tag} (${interaction.user.id})`);
+
         } catch (err) {
-            console.log('❌ ERROR:', err);
+            console.error('❌ Error during exit flow:', err);
+
+            // Let the user know something went wrong
+            try {
+                await interaction.editReply({
+                    content: '❌ Something went wrong. Please contact a server admin.'
+                });
+            } catch (_) { /* interaction may have expired */ }
         }
     }
 });
 
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
+process.on('SIGTERM', () => {
+    console.log('🛑 SIGTERM received — shutting down gracefully');
+    client.destroy();
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    console.log('🛑 SIGINT received — shutting down gracefully');
+    client.destroy();
+    process.exit(0);
+});
+
+// ─── Login ────────────────────────────────────────────────────────────────────
 client.login(TOKEN);
