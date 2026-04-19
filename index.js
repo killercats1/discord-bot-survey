@@ -5,8 +5,7 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    Events,
-    EmbedBuilder
+    Events
 } = require('discord.js');
 
 const client = new Client({
@@ -26,45 +25,44 @@ client.once('ready', () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-// 🎯 COMMAND
 client.on('messageCreate', async (message) => {
+    console.log(`📨 Message detected: ${message.content}`);
+
     if (message.author.bot) return;
 
     if (message.content.toLowerCase() === '!leavepanel') {
-
-        const embed = new EmbedBuilder()
-            .setColor(0x5865F2)
-            .setTitle("👋 Leaving so soon?")
-            .setDescription(
-                "We at **A Kings Hangout** are sad to see you go...\n\n" +
-                "But before you leave, please use this to give feedback and help us improve in the future!"
-            )
-            .setFooter({ text: "Your feedback helps us grow 💙" });
+        console.log('✅ Command triggered');
 
         const button = new ButtonBuilder()
             .setCustomId('leave_start')
-            .setLabel('Leave & Give Feedback')
+            .setLabel('Leave Server')
             .setStyle(ButtonStyle.Danger);
 
         const row = new ActionRowBuilder().addComponents(button);
 
         await message.channel.send({
-            embeds: [embed],
+            content: 'Click below to leave and give feedback:',
             components: [row]
         });
+
+        console.log('✅ Button sent');
     }
 });
 
-// 🔘 BUTTON SYSTEM
 client.on(Events.InteractionCreate, async (interaction) => {
+    console.log('🔘 Interaction received');
+
     if (!interaction.isButton()) return;
 
-    if (interaction.customId === 'leave_start') {
+    console.log(`🔘 Button clicked by ${interaction.user.tag}`);
 
+    if (interaction.customId === 'leave_start') {
         await interaction.reply({
-            content: "📝 Tell us honestly — why are you leaving?",
+            content: 'Why are you leaving? Type your answer in chat.',
             ephemeral: true
         });
+
+        console.log('📝 Waiting for response...');
 
         const filter = (m) => m.author.id === interaction.user.id;
 
@@ -76,38 +74,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
 
             if (!collected.size) {
-                return interaction.followUp({
-                    content: "⏰ You didn’t respond in time.",
-                    ephemeral: true
-                });
+                console.log('⚠️ No response received');
+                return;
             }
 
             const response = collected.first().content;
+            console.log(`📋 Response received: ${response}`);
 
             const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
 
-            const logEmbed = new EmbedBuilder()
-                .setColor(0xED4245)
-                .setTitle("📋 Exit Survey Response")
-                .addFields(
-                    { name: "User", value: `${interaction.user.tag}`, inline: true },
-                    { name: "User ID", value: `${interaction.user.id}`, inline: true },
-                    { name: "Response", value: response }
-                )
-                .setTimestamp();
+            await logChannel.send(
+                `📋 **Exit Survey**\n` +
+                `User: ${interaction.user.tag}\n` +
+                `ID: ${interaction.user.id}\n\n` +
+                `Response:\n${response}`
+            );
 
-            await logChannel.send({ embeds: [logEmbed] });
+            console.log('✅ Response sent to log channel');
 
             const member = await interaction.guild.members.fetch(interaction.user.id);
-            await member.kick("Exit survey completed");
+            await member.kick('Exit survey completed');
 
-            await interaction.followUp({
-                content: "💔 Thanks for your feedback. You have now left the server.",
-                ephemeral: true
-            });
-
+            console.log('🚪 User kicked successfully');
         } catch (err) {
-            console.log("❌ ERROR:", err);
+            console.log('❌ ERROR:', err);
         }
     }
 });
