@@ -5,7 +5,8 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    Events
+    Events,
+    EmbedBuilder
 } = require('discord.js');
 
 const client = new Client({
@@ -25,44 +26,45 @@ client.once('ready', () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
+// 🎯 COMMAND
 client.on('messageCreate', async (message) => {
-    console.log(`📨 Message detected: ${message.content}`);
-
     if (message.author.bot) return;
 
     if (message.content.toLowerCase() === '!leavepanel') {
-        console.log('✅ Command triggered');
+
+        const embed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle("👋 Leaving so soon?")
+            .setDescription(
+                "We at **A Kings Hangout** are sad to see you go...\n\n" +
+                "But before you leave, please use this to give feedback and help us improve in the future!"
+            )
+            .setFooter({ text: "Your feedback helps us grow 💙" });
 
         const button = new ButtonBuilder()
             .setCustomId('leave_start')
-            .setLabel('Leave Server')
+            .setLabel('Leave & Give Feedback')
             .setStyle(ButtonStyle.Danger);
 
         const row = new ActionRowBuilder().addComponents(button);
 
         await message.channel.send({
-            content: 'Click below to leave and give feedback:',
+            embeds: [embed],
             components: [row]
         });
-
-        console.log('✅ Button sent');
     }
 });
 
+// 🔘 BUTTON SYSTEM
 client.on(Events.InteractionCreate, async (interaction) => {
-    console.log('🔘 Interaction received');
-
     if (!interaction.isButton()) return;
 
-    console.log(`🔘 Button clicked by ${interaction.user.tag}`);
-
     if (interaction.customId === 'leave_start') {
+
         await interaction.reply({
-            content: 'Why are you leaving? Type your answer in chat.',
+            content: "📝 Tell us honestly — why are you leaving?",
             ephemeral: true
         });
-
-        console.log('📝 Waiting for response...');
 
         const filter = (m) => m.author.id === interaction.user.id;
 
@@ -74,30 +76,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
 
             if (!collected.size) {
-                console.log('⚠️ No response received');
-                return;
+                return interaction.followUp({
+                    content: "⏰ You didn’t respond in time.",
+                    ephemeral: true
+                });
             }
 
             const response = collected.first().content;
-            console.log(`📋 Response received: ${response}`);
 
             const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
 
-            await logChannel.send(
-                `📋 **Exit Survey**\n` +
-                `User: ${interaction.user.tag}\n` +
-                `ID: ${interaction.user.id}\n\n` +
-                `Response:\n${response}`
-            );
+            const logEmbed = new EmbedBuilder()
+                .setColor(0xED4245)
+                .setTitle("📋 Exit Survey Response")
+                .addFields(
+                    { name: "User", value: `${interaction.user.tag}`, inline: true },
+                    { name: "User ID", value: `${interaction.user.id}`, inline: true },
+                    { name: "Response", value: response }
+                )
+                .setTimestamp();
 
-            console.log('✅ Response sent to log channel');
+            await logChannel.send({ embeds: [logEmbed] });
 
             const member = await interaction.guild.members.fetch(interaction.user.id);
-            await member.kick('Exit survey completed');
+            await member.kick("Exit survey completed");
 
-            console.log('🚪 User kicked successfully');
+            await interaction.followUp({
+                content: "💔 Thanks for your feedback. You have now left the server.",
+                ephemeral: true
+            });
+
         } catch (err) {
-            console.log('❌ ERROR:', err);
+            console.log("❌ ERROR:", err);
         }
     }
 });
