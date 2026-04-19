@@ -1,98 +1,108 @@
 const {
     Client,
+const {
+    Client,
     GatewayIntentBits,
     Partials,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    Events
+    Events,
+    REST,
+    Routes,
+    SlashCommandBuilder
 } = require('discord.js');
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.GuildMembers
     ],
     partials: [Partials.Channel]
 });
 
 const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 
-client.once('clientReady', () => {
+client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}`);
+
+    // 🔥 REGISTER SLASH COMMAND
+    const commands = [
+        new SlashCommandBuilder()
+            .setName('leavepanel')
+            .setDescription('Send the leave survey panel')
+    ].map(cmd => cmd.toJSON());
+
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+    await rest.put(
+        Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+        { body: commands }
+    );
+
+    console.log("Slash command registered");
 });
 
-// ✅ COMMAND HANDLER
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
-
-    if (message.content.toLowerCase() === '!leavepanel') {
-
-        const button = new ButtonBuilder()
-            .setCustomId('leave_start')
-            .setLabel('Leave Server')
-            .setStyle(ButtonStyle.Danger);
-
-        const row = new ActionRowBuilder().addComponents(button);
-
-        await message.channel.send({
-            content: "Thinking about leaving? Click below to give feedback and leave:",
-            components: [row]
-        });
-    }
-});
-
-// ✅ BUTTON SYSTEM
+// 🔘 HANDLE COMMANDS + BUTTONS
 client.on(Events.InteractionCreate, async (interaction) => {
-    if (!interaction.isButton()) return;
 
-    if (interaction.customId === 'leave_start') {
+    // 📌 SLASH COMMAND
+    if (interaction.isChatInputCommand()) {
 
-        await interaction.reply({
-            content: "Why are you leaving? Type your answer in chat.",
-            ephemeral: true
-        });
+        if (interaction.commandName === 'leavepanel') {
 
-        const filter = (m) => m.author.id === interaction.user.id;
+            const button = new ButtonBuilder()
+                .setCustomId('leave_start')
+                .setLabel('Leave Server')
+                .setStyle(ButtonStyle.Danger);
 
-        try {
-            const collected = await interaction.channel.awaitMessages({
-                filter,
-                max: 1,
-                time: 600000
+            const row = new ActionRowBuilder().addComponents(button);
+
+            await interaction.reply({
+                content: "Thinking about leaving? Click below:",
+                components: [row]
             });
+        }
+    }
 
-            if (!collected.size) {
-                return interaction.followUp({
-                    content: "No response received.",
-                    ephemeral: true
-                });
-            }
+    // 🔘 BUTTON CLICK
+    if (interaction.isButton()) {
 
-            const response = collected.first().content;
+        if (interaction.customId === 'leave_start') {
 
-            const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-
-            await logChannel.send(
-                `📋 **Exit Survey**\n` +
-                `User: ${interaction.user.tag}\n` +
-                `ID: ${interaction.user.id}\n\n` +
-                `Response:\n${response}`
-            );
-
-            // ✅ Kick user after response
-            const member = await interaction.guild.members.fetch(interaction.user.id);
-            await member.kick("User completed exit survey");
-
-            await interaction.followUp({
-                content: "Thanks for your feedback. You have been removed from the server.",
+            await interaction.reply({
+                content: "Why are you leaving? Type your answer in chat.",
                 ephemeral: true
             });
 
-        } catch (err) {
-            console.log("Error collecting response:", err);
+            const filter = (m) => m.author.id === interaction.user.id;
+
+            try {
+                const collected = await interaction.channel.awaitMessages({
+                    filter,
+                    max: 1,
+                    time: 600000
+                });
+
+                if (!collected.size) return;
+
+                const response = collected.first().content;
+
+                const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
+
+                await logChannel.send(
+                    `📋 Exit Survey\nUser: ${interaction.user.tag}\nResponse:\n${response}`
+                );
+
+                const member = await interaction.guild.members.fetch(interaction.user.id);
+                await member.kick("Exit survey completed");
+
+            } catch (err) {
+                console.log(err);
+            }
         }
     }
 });
