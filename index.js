@@ -13,8 +13,7 @@ const {
     REST,
     Routes,
     SlashCommandBuilder,
-    ChannelType,
-    PermissionFlagsBits
+    ChannelType
 } = require('discord.js');
 
 const http = require('http');
@@ -35,7 +34,7 @@ const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './data.json';
 
-// ─── In-memory captcha store (userId -> { code, guildId }) ───────────────────
+// ─── In-memory captcha store ──────────────────────────────────────────────────
 const captchaStore = new Map();
 
 // ─── Data storage ─────────────────────────────────────────────────────────────
@@ -88,9 +87,7 @@ async function sendDiscordLog({ type, message, timestamp }) {
 function generateCaptcha() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
-    for (let i = 0; i < 6; i++) {
-        code += chars[Math.floor(Math.random() * chars.length)];
-    }
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
     return code;
 }
 
@@ -109,7 +106,7 @@ const client = new Client({
     partials: [Partials.Channel]
 });
 
-// ─── Commands ─────────────────────────────────────────────────────────────────
+// ─── Command definitions ──────────────────────────────────────────────────────
 const commands = [
     new SlashCommandBuilder()
         .setName('leavepanel')
@@ -152,30 +149,32 @@ const commands = [
         .toJSON(),
 ];
 
-// ─── Register commands ────────────────────────────────────────────────────────
-async function registerCommands() {
+// ─── Register commands per-guild only (no global = no duplicates) ─────────────
+async function registerGuildCommands(guildId) {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
-        console.log('🔄 Registering slash commands...');
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        for (const guild of client.guilds.cache.values()) {
-            await registerGuildCommands(guild.id, rest);
-        }
-        console.log('✅ Commands registered');
-        await discordLog('success', 'Slash commands registered successfully.');
-    } catch (err) {
-        console.error('❌ Failed to register commands:', err);
-        await discordLog('error', `Failed to register commands: ${err.message}`);
-    }
-}
-
-async function registerGuildCommands(guildId, existingRest) {
-    const rest = existingRest || new REST({ version: '10' }).setToken(TOKEN);
-    try {
         await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commands });
+        console.log(`✅ Commands registered for guild ${guildId}`);
     } catch (err) {
         console.error(`❌ Failed to register commands for guild ${guildId}:`, err.message);
     }
+}
+
+async function registerAllGuilds() {
+    // Also clear any leftover global commands to fix the duplicates
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    try {
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+        console.log('🧹 Cleared global commands');
+    } catch (err) {
+        console.error('❌ Failed to clear global commands:', err.message);
+    }
+
+    for (const guild of client.guilds.cache.values()) {
+        await registerGuildCommands(guild.id);
+    }
+
+    await discordLog('success', 'Commands registered in all guilds.');
 }
 
 // ─── Ready ────────────────────────────────────────────────────────────────────
@@ -185,7 +184,7 @@ client.once('ready', async () => {
     for (const entry of logQueue) await sendDiscordLog(entry);
     logQueue.length = 0;
     await discordLog('success', `Bot online — **${client.user.tag}** | In **${client.guilds.cache.size}** servers`);
-    await registerCommands();
+    await registerAllGuilds();
 });
 
 client.on(Events.GuildCreate, async (guild) => {
@@ -222,14 +221,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             verification: { type, roleId: role.id, channelId: channel.id }
         });
 
-        // Build the verification panel embed + button
         const isSurvey = type === 'survey';
 
         const panelEmbed = new EmbedBuilder()
             .setTitle(isSurvey ? '📋 Verify to join!' : '🔒 Verify to join!')
             .setDescription(isSurvey
-                ? `Welcome! To gain access to the server, click the button below and answer a couple of quick questions.`
-                : `Welcome! To gain access to the server, click the button below and enter the captcha code you'll be given.`)
+                ? 'Welcome! Click below and answer a couple of quick questions to gain access.'
+                : 'Welcome! Click below and enter the captcha code you\'ll be given to gain access.')
             .setColor(0x5865F2)
             .setFooter({ text: `Verification type: ${isSurvey ? 'Survey' : 'Captcha'}` });
 
@@ -238,19 +236,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setLabel(isSurvey ? '📋 Start Survey' : '🔒 Get Captcha')
             .setStyle(ButtonStyle.Primary);
 
-        const row = new ActionRowBuilder().addComponents(verifyButton);
-
-        // Post panel in the chosen channel
         const verChannel = await client.channels.fetch(channel.id);
-        await verChannel.send({ embeds: [panelEmbed], components: [row] });
+        await verChannel.send({ embeds: [panelEmbed], components: [new ActionRowBuilder().addComponents(verifyButton)] });
 
         await interaction.reply({
             embeds: [new EmbedBuilder()
                 .setTitle('✅ Verification Setup Complete')
                 .addFields(
-                    { name: 'Type', value: isSurvey ? '📋 Survey' : '🔒 Captcha', inline: true },
-                    { name: 'Role', value: `<@&${role.id}>`, inline: true },
-                    { name: 'Channel', value: `<#${channel.id}>`, inline: true }
+                    { name: 'Type',    value: isSurvey ? '📋 Survey' : '🔒 Captcha', inline: true },
+                    { name: 'Role',    value: `<@&${role.id}>`,                       inline: true },
+                    { name: 'Channel', value: `<#${channel.id}>`,                     inline: true }
                 )
                 .setColor(0x57F287)],
             ephemeral: true
@@ -264,10 +259,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand() && interaction.commandName === 'leavepanel') {
         const config = getGuildConfig(interaction.guild.id);
         if (!config.logChannelId) {
-            await interaction.reply({
-                content: '⚠️ No log channel set! Run `/setup` first.',
-                ephemeral: true
-            });
+            await interaction.reply({ content: '⚠️ No log channel set! Run `/setup` first.', ephemeral: true });
             return;
         }
 
@@ -321,11 +313,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton() && interaction.customId === 'verify_start_captcha') {
         const code = generateCaptcha();
         captchaStore.set(interaction.user.id, { code, guildId: interaction.guild.id });
-
-        // Auto-expire captcha after 5 minutes
         setTimeout(() => captchaStore.delete(interaction.user.id), 300000);
 
-        // Show captcha code ephemerally, then open modal
         await interaction.reply({
             embeds: [new EmbedBuilder()
                 .setTitle('🔒 Your Captcha Code')
@@ -335,7 +324,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ephemeral: true
         });
 
-        // Follow up with a button to open the input modal
         const enterButton = new ButtonBuilder()
             .setCustomId('verify_captcha_enter')
             .setLabel('Enter Code')
@@ -395,7 +383,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 `> How they found us: ${q1}\n> Agreed to rules: ${q2}`
             );
         } catch (err) {
-            console.error('❌ Failed to give role:', err.message);
             await interaction.editReply({ content: '❌ Something went wrong. Please contact an admin.' });
             await discordLog('error', `Failed to verify ${interaction.user.tag} in **${interaction.guild.name}**: ${err.message}`);
         }
@@ -406,27 +393,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit() && interaction.customId === 'verify_modal_captcha') {
         await interaction.deferReply({ flags: 64 });
 
-        const input = interaction.fields.getTextInputValue('captcha_input').toUpperCase().trim();
+        const input  = interaction.fields.getTextInputValue('captcha_input').toUpperCase().trim();
         const stored = captchaStore.get(interaction.user.id);
 
         if (!stored) {
-            await interaction.editReply({ content: '⏱️ Your captcha expired. Click the button again to get a new one.' });
+            await interaction.editReply({ content: '⏱️ Your captcha expired. Click the verify button again to get a new one.' });
             return;
         }
 
         if (input !== stored.code) {
+            captchaStore.delete(interaction.user.id);
             await interaction.editReply({
                 embeds: [new EmbedBuilder()
                     .setTitle('❌ Incorrect Code')
                     .setDescription('That code was wrong. Click the verify button again to get a new captcha.')
                     .setColor(0xED4245)]
             });
-            captchaStore.delete(interaction.user.id);
             await discordLog('warning', `⚠️ **${interaction.user.tag}** failed captcha in **${interaction.guild.name}**`);
             return;
         }
 
-        // Correct!
         captchaStore.delete(interaction.user.id);
         const config = getGuildConfig(interaction.guild.id);
 
@@ -443,7 +429,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             await discordLog('success', `✅ **${interaction.user.tag}** verified in **${interaction.guild.name}** (Captcha)`);
         } catch (err) {
-            console.error('❌ Failed to give role:', err.message);
             await interaction.editReply({ content: '❌ Something went wrong. Please contact an admin.' });
             await discordLog('error', `Failed to verify ${interaction.user.tag} in **${interaction.guild.name}**: ${err.message}`);
         }
@@ -489,7 +474,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const improve = interaction.fields.getTextInputValue('leave_improve') || '_No response_';
         const config  = getGuildConfig(interaction.guild.id);
 
-        // Log exit survey
         try {
             if (!config.logChannelId) throw new Error('No log channel configured');
             const logChannel = await client.channels.fetch(config.logChannelId);
@@ -499,20 +483,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     .setColor(0xFEE75C)
                     .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
                     .addFields(
-                        { name: 'User', value: `${interaction.user.tag}`, inline: true },
-                        { name: 'ID', value: `\`${interaction.user.id}\``, inline: true },
-                        { name: 'Server', value: interaction.guild.name, inline: true },
-                        { name: '❓ Why leaving?', value: reason },
+                        { name: 'User',                  value: `${interaction.user.tag}`, inline: true },
+                        { name: 'ID',                    value: `\`${interaction.user.id}\``, inline: true },
+                        { name: 'Server',                value: interaction.guild.name, inline: true },
+                        { name: '❓ Why leaving?',       value: reason },
                         { name: '💡 What could be better?', value: improve }
                     )
                     .setTimestamp()]
             });
         } catch (err) {
-            console.error('❌ Failed to log exit survey:', err.message);
             await discordLog('error', `Failed to log exit survey in **${interaction.guild.name}**: ${err.message}`);
         }
 
-        // Kick
         try {
             await interaction.editReply({ content: '✅ Thanks for your feedback! You will now be removed from the server.' });
             await new Promise(r => setTimeout(r, 2000));
@@ -520,7 +502,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await member.kick('Exit survey completed');
             await discordLog('success', `🚪 **${interaction.user.tag}** left **${interaction.guild.name}**`);
         } catch (err) {
-            console.error('❌ Failed to kick:', err.message);
             await discordLog('error', `Failed to kick **${interaction.user.tag}** from **${interaction.guild.name}**: ${err.message}`);
             await interaction.editReply({ content: '❌ Something went wrong. Please contact a server admin.' });
         }
