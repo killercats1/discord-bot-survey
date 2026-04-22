@@ -31,6 +31,7 @@ for (const key of REQUIRED_ENV) {
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+const PING_USER_ID = '1221935327556407506';
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './data.json';
 
@@ -64,8 +65,8 @@ function setLogChannel(guildId, channelId) {
 const logQueue = [];
 let logReady = false;
 
-async function discordLog(type, message) {
-    const entry = { type, message, timestamp: new Date() };
+async function discordLog(type, message, ping = false) {
+    const entry = { type, message, timestamp: new Date(), ping };
     if (!logReady) {
         logQueue.push(entry);
         return;
@@ -73,7 +74,7 @@ async function discordLog(type, message) {
     await sendDiscordLog(entry);
 }
 
-async function sendDiscordLog({ type, message, timestamp }) {
+async function sendDiscordLog({ type, message, timestamp, ping }) {
     try {
         const channel = await client.channels.fetch(LOG_CHANNEL_ID);
         const colors = {
@@ -92,7 +93,11 @@ async function sendDiscordLog({ type, message, timestamp }) {
             .setDescription(`${icons[type] || 'ℹ️'} ${message}`)
             .setColor(colors[type] || 0x5865F2)
             .setTimestamp(timestamp);
-        await channel.send({ embeds: [embed] });
+
+        await channel.send({
+            content: ping ? `<@${PING_USER_ID}>` : undefined,
+            embeds: [embed]
+        });
     } catch (err) {
         console.error('Failed to send Discord log:', err.message);
     }
@@ -145,13 +150,12 @@ async function registerCommands() {
         console.log('✅ Global slash commands registered');
         await discordLog('success', 'Global slash commands registered.');
 
-        // Also register instantly for every guild the bot is already in
         for (const guild of client.guilds.cache.values()) {
             await registerGuildCommands(guild.id, rest);
         }
     } catch (err) {
         console.error('❌ Failed to register commands:', err);
-        await discordLog('error', `Failed to register commands: ${err.message}`);
+        await discordLog('error', `Failed to register commands: ${err.message}`, true);
     }
 }
 
@@ -183,7 +187,7 @@ client.once('ready', async () => {
 // ─── Register commands instantly when bot joins a new server ─────────────────
 client.on(Events.GuildCreate, async (guild) => {
     console.log(`📥 Joined new guild: ${guild.name}`);
-    await discordLog('info', `📥 Joined new server: **${guild.name}** (${guild.memberCount} members)`);
+    await discordLog('info', `📥 Joined new server: **${guild.name}** (${guild.memberCount} members)`, true);
     await registerGuildCommands(guild.id);
 });
 
@@ -294,7 +298,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             console.log('✅ Exit survey logged');
         } catch (err) {
             console.error('❌ Failed to log exit survey:', err.message);
-            await discordLog('error', `Failed to log exit survey in **${interaction.guild.name}**: ${err.message}`);
+            await discordLog('error', `Failed to log exit survey in **${interaction.guild.name}**: ${err.message}`, true);
         }
 
         // Kick
@@ -309,10 +313,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await member.kick('Exit survey completed');
 
             console.log(`🚪 Kicked ${interaction.user.tag} from ${interaction.guild.name}`);
-            await discordLog('success', `🚪 **${interaction.user.tag}** was kicked from **${interaction.guild.name}**`);
+            await discordLog('success', `🚪 **${interaction.user.tag}** was kicked from **${interaction.guild.name}**`, true);
         } catch (err) {
             console.error('❌ Failed to kick:', err.message);
-            await discordLog('error', `Failed to kick **${interaction.user.tag}** from **${interaction.guild.name}**: ${err.message}`);
+            await discordLog('error', `Failed to kick **${interaction.user.tag}** from **${interaction.guild.name}**: ${err.message}`, true);
             await interaction.editReply({
                 content: '❌ Something went wrong. Please contact a server admin.'
             });
@@ -323,14 +327,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 process.on('SIGTERM', async () => {
     console.log('🛑 Shutting down...');
-    await discordLog('warning', 'Bot is shutting down (SIGTERM)');
+    await discordLog('warning', 'Bot is shutting down (SIGTERM)', true);
     client.destroy();
     process.exit(0);
 });
 
 process.on('SIGINT', async () => {
     console.log('🛑 Shutting down...');
-    await discordLog('warning', 'Bot is shutting down (SIGINT)');
+    await discordLog('warning', 'Bot is shutting down (SIGINT)', true);
     client.destroy();
     process.exit(0);
 });
