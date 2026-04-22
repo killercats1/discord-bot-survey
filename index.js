@@ -13,13 +13,14 @@ const {
     REST,
     Routes,
     SlashCommandBuilder,
-    ChannelType
+    ChannelType,
+    PermissionFlagsBits
 } = require('discord.js');
 
 const http = require('http');
 const fs = require('fs');
 
-// ─── Validate environment variables on startup ───────────────────────────────
+// ─── Validate environment variables ──────────────────────────────────────────
 const REQUIRED_ENV = ['TOKEN', 'CLIENT_ID', 'LOG_CHANNEL_ID'];
 for (const key of REQUIRED_ENV) {
     if (!process.env[key]) {
@@ -31,33 +32,30 @@ for (const key of REQUIRED_ENV) {
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
-const PING_USER_ID = '1221935327556407506';
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = './data.json';
 
-// ─── Per-guild data storage ───────────────────────────────────────────────────
+// ─── In-memory captcha store (userId -> { code, guildId }) ───────────────────
+const captchaStore = new Map();
+
+// ─── Data storage ─────────────────────────────────────────────────────────────
 function loadData() {
     if (!fs.existsSync(DATA_FILE)) return {};
-    try {
-        return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    } catch {
-        return {};
-    }
+    try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
+    catch { return {}; }
 }
 
 function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-function getLogChannel(guildId) {
-    const data = loadData();
-    return data[guildId]?.logChannelId || null;
+function getGuildConfig(guildId) {
+    return loadData()[guildId] || {};
 }
 
-function setLogChannel(guildId, channelId) {
+function setGuildConfig(guildId, config) {
     const data = loadData();
-    if (!data[guildId]) data[guildId] = {};
-    data[guildId].logChannelId = channelId;
+    data[guildId] = { ...data[guildId], ...config };
     saveData(data);
 }
 
@@ -65,51 +63,42 @@ function setLogChannel(guildId, channelId) {
 const logQueue = [];
 let logReady = false;
 
-async function discordLog(type, message, ping = false) {
-    const entry = { type, message, timestamp: new Date(), ping };
-    if (!logReady) {
-        logQueue.push(entry);
-        return;
-    }
+async function discordLog(type, message) {
+    const entry = { type, message, timestamp: new Date() };
+    if (!logReady) { logQueue.push(entry); return; }
     await sendDiscordLog(entry);
 }
 
-async function sendDiscordLog({ type, message, timestamp, ping }) {
+async function sendDiscordLog({ type, message, timestamp }) {
     try {
         const channel = await client.channels.fetch(LOG_CHANNEL_ID);
-        const colors = {
-            info:    0x5865F2,
-            success: 0x57F287,
-            warning: 0xFEE75C,
-            error:   0xED4245,
-        };
-        const icons = {
-            info:    'ℹ️',
-            success: '✅',
-            warning: '⚠️',
-            error:   '❌',
-        };
+        const colors = { info: 0x5865F2, success: 0x57F287, warning: 0xFEE75C, error: 0xED4245 };
+        const icons  = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' };
         const embed = new EmbedBuilder()
             .setDescription(`${icons[type] || 'ℹ️'} ${message}`)
             .setColor(colors[type] || 0x5865F2)
             .setTimestamp(timestamp);
-
-        await channel.send({
-            content: ping ? `<@${PING_USER_ID}>` : undefined,
-            embeds: [embed]
-        });
+        await channel.send({ embeds: [embed] });
     } catch (err) {
         console.error('Failed to send Discord log:', err.message);
     }
+}
+
+// ─── Captcha generator ────────────────────────────────────────────────────────
+function generateCaptcha() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+        code += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return code;
 }
 
 // ─── Health check server ──────────────────────────────────────────────────────
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('OK');
-}).listen(PORT, () => {
-    console.log(`🌐 Health check server listening on port ${PORT}`);
-});
+}).listen(PORT, () => console.log(`🌐 Health check server listening on port ${PORT}`));
 
 // ─── Discord client ───────────────────────────────────────────────────────────
 const client = new Client({
@@ -120,51 +109,70 @@ const client = new Client({
     partials: [Partials.Channel]
 });
 
-// ─── Command definitions ──────────────────────────────────────────────────────
+// ─── Commands ─────────────────────────────────────────────────────────────────
 const commands = [
     new SlashCommandBuilder()
         .setName('leavepanel')
         .setDescription('Post the leave server panel in this channel')
         .setDefaultMemberPermissions('8')
         .toJSON(),
+
     new SlashCommandBuilder()
         .setName('setup')
         .setDescription('Set the log channel for exit surveys')
         .setDefaultMemberPermissions('8')
-        .addChannelOption(option =>
-            option
-                .setName('channel')
-                .setDescription('The channel to log exit surveys to')
-                .addChannelTypes(ChannelType.GuildText)
-                .setRequired(true)
-        )
-        .toJSON()
+        .addChannelOption(o => o
+            .setName('channel')
+            .setDescription('The channel to log exit surveys to')
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true))
+        .toJSON(),
+
+    new SlashCommandBuilder()
+        .setName('runversetup')
+        .setDescription('Set up the verification system for this server')
+        .setDefaultMemberPermissions('8')
+        .addStringOption(o => o
+            .setName('type')
+            .setDescription('Which verification type to use')
+            .setRequired(true)
+            .addChoices(
+                { name: '📋 Survey (1-2 questions)', value: 'survey' },
+                { name: '🔒 Captcha (type the code)', value: 'captcha' }
+            ))
+        .addRoleOption(o => o
+            .setName('role')
+            .setDescription('Role to give users after verifying')
+            .setRequired(true))
+        .addChannelOption(o => o
+            .setName('channel')
+            .setDescription('Channel to post the verification panel in')
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true))
+        .toJSON(),
 ];
 
-// ─── Register commands globally + for all current guilds ─────────────────────
+// ─── Register commands ────────────────────────────────────────────────────────
 async function registerCommands() {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
-        console.log('🔄 Registering global slash commands...');
+        console.log('🔄 Registering slash commands...');
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log('✅ Global slash commands registered');
-        await discordLog('success', 'Global slash commands registered.');
-
         for (const guild of client.guilds.cache.values()) {
             await registerGuildCommands(guild.id, rest);
         }
+        console.log('✅ Commands registered');
+        await discordLog('success', 'Slash commands registered successfully.');
     } catch (err) {
         console.error('❌ Failed to register commands:', err);
-        await discordLog('error', `Failed to register commands: ${err.message}`, true);
+        await discordLog('error', `Failed to register commands: ${err.message}`);
     }
 }
 
-// ─── Register commands for a single guild (instant) ──────────────────────────
 async function registerGuildCommands(guildId, existingRest) {
     const rest = existingRest || new REST({ version: '10' }).setToken(TOKEN);
     try {
         await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commands });
-        console.log(`✅ Commands registered for guild ${guildId}`);
     } catch (err) {
         console.error(`❌ Failed to register commands for guild ${guildId}:`, err.message);
     }
@@ -174,47 +182,90 @@ async function registerGuildCommands(guildId, existingRest) {
 client.once('ready', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     logReady = true;
-
-    for (const entry of logQueue) {
-        await sendDiscordLog(entry);
-    }
+    for (const entry of logQueue) await sendDiscordLog(entry);
     logQueue.length = 0;
-
-    await discordLog('success', `Bot online — logged in as **${client.user.tag}** | In **${client.guilds.cache.size}** servers`);
+    await discordLog('success', `Bot online — **${client.user.tag}** | In **${client.guilds.cache.size}** servers`);
     await registerCommands();
 });
 
-// ─── Register commands instantly when bot joins a new server ─────────────────
 client.on(Events.GuildCreate, async (guild) => {
-    console.log(`📥 Joined new guild: ${guild.name}`);
-    await discordLog('info', `📥 Joined new server: **${guild.name}** (${guild.memberCount} members)`, true);
+    await discordLog('info', `📥 Joined new server: **${guild.name}** (${guild.memberCount} members)`);
     await registerGuildCommands(guild.id);
 });
 
 // ─── Interactions ─────────────────────────────────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
 
-    // /setup
+    // ── /setup ────────────────────────────────────────────────────────────────
     if (interaction.isChatInputCommand() && interaction.commandName === 'setup') {
         const channel = interaction.options.getChannel('channel');
-        setLogChannel(interaction.guild.id, channel.id);
+        setGuildConfig(interaction.guild.id, { logChannelId: channel.id });
 
-        const embed = new EmbedBuilder()
-            .setTitle('✅ Setup Complete')
-            .setDescription(`Exit survey logs will now be sent to ${channel}.`)
-            .setColor(0x57F287);
-
-        await interaction.reply({ embeds: [embed], ephemeral: true });
-        await discordLog('info', `⚙️ **${interaction.guild.name}** set their log channel to <#${channel.id}>`);
+        await interaction.reply({
+            embeds: [new EmbedBuilder()
+                .setTitle('✅ Setup Complete')
+                .setDescription(`Exit survey logs will now be sent to ${channel}.`)
+                .setColor(0x57F287)],
+            ephemeral: true
+        });
+        await discordLog('info', `⚙️ **${interaction.guild.name}** set log channel to <#${channel.id}>`);
         return;
     }
 
-    // /leavepanel
+    // ── /runversetup ──────────────────────────────────────────────────────────
+    if (interaction.isChatInputCommand() && interaction.commandName === 'runversetup') {
+        const type    = interaction.options.getString('type');
+        const role    = interaction.options.getRole('role');
+        const channel = interaction.options.getChannel('channel');
+
+        setGuildConfig(interaction.guild.id, {
+            verification: { type, roleId: role.id, channelId: channel.id }
+        });
+
+        // Build the verification panel embed + button
+        const isSurvey = type === 'survey';
+
+        const panelEmbed = new EmbedBuilder()
+            .setTitle(isSurvey ? '📋 Verify to join!' : '🔒 Verify to join!')
+            .setDescription(isSurvey
+                ? `Welcome! To gain access to the server, click the button below and answer a couple of quick questions.`
+                : `Welcome! To gain access to the server, click the button below and enter the captcha code you'll be given.`)
+            .setColor(0x5865F2)
+            .setFooter({ text: `Verification type: ${isSurvey ? 'Survey' : 'Captcha'}` });
+
+        const verifyButton = new ButtonBuilder()
+            .setCustomId(`verify_start_${type}`)
+            .setLabel(isSurvey ? '📋 Start Survey' : '🔒 Get Captcha')
+            .setStyle(ButtonStyle.Primary);
+
+        const row = new ActionRowBuilder().addComponents(verifyButton);
+
+        // Post panel in the chosen channel
+        const verChannel = await client.channels.fetch(channel.id);
+        await verChannel.send({ embeds: [panelEmbed], components: [row] });
+
+        await interaction.reply({
+            embeds: [new EmbedBuilder()
+                .setTitle('✅ Verification Setup Complete')
+                .addFields(
+                    { name: 'Type', value: isSurvey ? '📋 Survey' : '🔒 Captcha', inline: true },
+                    { name: 'Role', value: `<@&${role.id}>`, inline: true },
+                    { name: 'Channel', value: `<#${channel.id}>`, inline: true }
+                )
+                .setColor(0x57F287)],
+            ephemeral: true
+        });
+
+        await discordLog('info', `🔐 **${interaction.guild.name}** set up **${type}** verification → role <@&${role.id}>`);
+        return;
+    }
+
+    // ── /leavepanel ───────────────────────────────────────────────────────────
     if (interaction.isChatInputCommand() && interaction.commandName === 'leavepanel') {
-        const logChannelId = getLogChannel(interaction.guild.id);
-        if (!logChannelId) {
+        const config = getGuildConfig(interaction.guild.id);
+        if (!config.logChannelId) {
             await interaction.reply({
-                content: '⚠️ No log channel set! Run `/setup` first to choose where exit surveys are logged.',
+                content: '⚠️ No log channel set! Run `/setup` first.',
                 ephemeral: true
             });
             return;
@@ -225,116 +276,266 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setLabel('🚪 Leave Server')
             .setStyle(ButtonStyle.Danger);
 
-        const row = new ActionRowBuilder().addComponents(button);
-
-        const embed = new EmbedBuilder()
-            .setTitle('Leaving?')
-            .setDescription("We're sorry to see you go. Click below to leave and share some quick feedback — it only takes a few seconds.")
-            .setColor(0xED4245);
-
-        await interaction.reply({ embeds: [embed], components: [row] });
-        await discordLog('info', `📋 Leave panel posted in **${interaction.guild.name}** by ${interaction.user.tag}`);
+        await interaction.reply({
+            embeds: [new EmbedBuilder()
+                .setTitle('Leaving?')
+                .setDescription("We're sorry to see you go. Click below to leave and share some quick feedback.")
+                .setColor(0xED4245)],
+            components: [new ActionRowBuilder().addComponents(button)]
+        });
         return;
     }
 
-    // Leave button → modal
-    if (interaction.isButton() && interaction.customId === 'leave_start') {
+    // ── Verify button: Survey ─────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'verify_start_survey') {
         const modal = new ModalBuilder()
-            .setCustomId('leave_modal')
-            .setTitle('Quick Exit Survey');
-
-        const reasonInput = new TextInputBuilder()
-            .setCustomId('leave_reason')
-            .setLabel('Why are you leaving?')
-            .setStyle(TextInputStyle.Paragraph)
-            .setPlaceholder('Be as honest as you like — this helps us improve.')
-            .setRequired(true)
-            .setMaxLength(1000);
-
-        const improveInput = new TextInputBuilder()
-            .setCustomId('leave_improve')
-            .setLabel('What could we have done better?')
-            .setStyle(TextInputStyle.Paragraph)
-            .setPlaceholder('Optional — any feedback is appreciated.')
-            .setRequired(false)
-            .setMaxLength(1000);
+            .setCustomId('verify_modal_survey')
+            .setTitle('Server Verification');
 
         modal.addComponents(
-            new ActionRowBuilder().addComponents(reasonInput),
-            new ActionRowBuilder().addComponents(improveInput)
+            new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                    .setCustomId('survey_q1')
+                    .setLabel('How did you find our server?')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('e.g. A friend, Reddit, Discord discovery...')
+                    .setRequired(true)
+                    .setMaxLength(200)
+            ),
+            new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                    .setCustomId('survey_q2')
+                    .setLabel('Do you agree to follow the server rules?')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('Yes / No')
+                    .setRequired(true)
+                    .setMaxLength(100)
+            )
         );
 
         await interaction.showModal(modal);
         return;
     }
 
-    // Modal submitted
+    // ── Verify button: Captcha ────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'verify_start_captcha') {
+        const code = generateCaptcha();
+        captchaStore.set(interaction.user.id, { code, guildId: interaction.guild.id });
+
+        // Auto-expire captcha after 5 minutes
+        setTimeout(() => captchaStore.delete(interaction.user.id), 300000);
+
+        // Show captcha code ephemerally, then open modal
+        await interaction.reply({
+            embeds: [new EmbedBuilder()
+                .setTitle('🔒 Your Captcha Code')
+                .setDescription(`Enter this code in the next step:\n\n# \`${code}\``)
+                .setColor(0x5865F2)
+                .setFooter({ text: 'This code expires in 5 minutes' })],
+            ephemeral: true
+        });
+
+        // Follow up with a button to open the input modal
+        const enterButton = new ButtonBuilder()
+            .setCustomId('verify_captcha_enter')
+            .setLabel('Enter Code')
+            .setStyle(ButtonStyle.Primary);
+
+        await interaction.followUp({
+            content: 'Click below to enter your captcha code:',
+            components: [new ActionRowBuilder().addComponents(enterButton)],
+            ephemeral: true
+        });
+        return;
+    }
+
+    // ── Captcha entry button ──────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'verify_captcha_enter') {
+        const modal = new ModalBuilder()
+            .setCustomId('verify_modal_captcha')
+            .setTitle('Enter Captcha Code');
+
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                    .setCustomId('captcha_input')
+                    .setLabel('Enter the code shown above')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('e.g. A3BX9K')
+                    .setRequired(true)
+                    .setMaxLength(6)
+            )
+        );
+
+        await interaction.showModal(modal);
+        return;
+    }
+
+    // ── Survey modal submitted ────────────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId === 'verify_modal_survey') {
+        await interaction.deferReply({ flags: 64 });
+
+        const q1 = interaction.fields.getTextInputValue('survey_q1');
+        const q2 = interaction.fields.getTextInputValue('survey_q2');
+        const config = getGuildConfig(interaction.guild.id);
+
+        try {
+            const member = await interaction.guild.members.fetch(interaction.user.id);
+            await member.roles.add(config.verification.roleId);
+
+            await interaction.editReply({
+                embeds: [new EmbedBuilder()
+                    .setTitle('✅ Verified!')
+                    .setDescription('You now have access to the server. Welcome!')
+                    .setColor(0x57F287)]
+            });
+
+            await discordLog('success',
+                `✅ **${interaction.user.tag}** verified in **${interaction.guild.name}** (Survey)\n` +
+                `> How they found us: ${q1}\n> Agreed to rules: ${q2}`
+            );
+        } catch (err) {
+            console.error('❌ Failed to give role:', err.message);
+            await interaction.editReply({ content: '❌ Something went wrong. Please contact an admin.' });
+            await discordLog('error', `Failed to verify ${interaction.user.tag} in **${interaction.guild.name}**: ${err.message}`);
+        }
+        return;
+    }
+
+    // ── Captcha modal submitted ───────────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId === 'verify_modal_captcha') {
+        await interaction.deferReply({ flags: 64 });
+
+        const input = interaction.fields.getTextInputValue('captcha_input').toUpperCase().trim();
+        const stored = captchaStore.get(interaction.user.id);
+
+        if (!stored) {
+            await interaction.editReply({ content: '⏱️ Your captcha expired. Click the button again to get a new one.' });
+            return;
+        }
+
+        if (input !== stored.code) {
+            await interaction.editReply({
+                embeds: [new EmbedBuilder()
+                    .setTitle('❌ Incorrect Code')
+                    .setDescription('That code was wrong. Click the verify button again to get a new captcha.')
+                    .setColor(0xED4245)]
+            });
+            captchaStore.delete(interaction.user.id);
+            await discordLog('warning', `⚠️ **${interaction.user.tag}** failed captcha in **${interaction.guild.name}**`);
+            return;
+        }
+
+        // Correct!
+        captchaStore.delete(interaction.user.id);
+        const config = getGuildConfig(interaction.guild.id);
+
+        try {
+            const member = await interaction.guild.members.fetch(interaction.user.id);
+            await member.roles.add(config.verification.roleId);
+
+            await interaction.editReply({
+                embeds: [new EmbedBuilder()
+                    .setTitle('✅ Verified!')
+                    .setDescription('Captcha passed! You now have access to the server. Welcome!')
+                    .setColor(0x57F287)]
+            });
+
+            await discordLog('success', `✅ **${interaction.user.tag}** verified in **${interaction.guild.name}** (Captcha)`);
+        } catch (err) {
+            console.error('❌ Failed to give role:', err.message);
+            await interaction.editReply({ content: '❌ Something went wrong. Please contact an admin.' });
+            await discordLog('error', `Failed to verify ${interaction.user.tag} in **${interaction.guild.name}**: ${err.message}`);
+        }
+        return;
+    }
+
+    // ── Leave button ──────────────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'leave_start') {
+        const modal = new ModalBuilder()
+            .setCustomId('leave_modal')
+            .setTitle('Quick Exit Survey');
+
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                    .setCustomId('leave_reason')
+                    .setLabel('Why are you leaving?')
+                    .setStyle(TextInputStyle.Paragraph)
+                    .setPlaceholder('Be as honest as you like — this helps us improve.')
+                    .setRequired(true)
+                    .setMaxLength(1000)
+            ),
+            new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                    .setCustomId('leave_improve')
+                    .setLabel('What could we have done better?')
+                    .setStyle(TextInputStyle.Paragraph)
+                    .setPlaceholder('Optional — any feedback is appreciated.')
+                    .setRequired(false)
+                    .setMaxLength(1000)
+            )
+        );
+
+        await interaction.showModal(modal);
+        return;
+    }
+
+    // ── Leave modal submitted ─────────────────────────────────────────────────
     if (interaction.isModalSubmit() && interaction.customId === 'leave_modal') {
         await interaction.deferReply({ flags: 64 });
 
-        const reason = interaction.fields.getTextInputValue('leave_reason');
+        const reason  = interaction.fields.getTextInputValue('leave_reason');
         const improve = interaction.fields.getTextInputValue('leave_improve') || '_No response_';
-        const logChannelId = getLogChannel(interaction.guild.id);
+        const config  = getGuildConfig(interaction.guild.id);
 
         // Log exit survey
         try {
-            if (!logChannelId) throw new Error('No log channel configured for this server');
-
-            const logChannel = await client.channels.fetch(logChannelId);
-            const logEmbed = new EmbedBuilder()
-                .setTitle('📋 Exit Survey')
-                .setColor(0xFEE75C)
-                .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
-                .addFields(
-                    { name: 'User', value: `${interaction.user.tag}`, inline: true },
-                    { name: 'ID', value: `\`${interaction.user.id}\``, inline: true },
-                    { name: 'Server', value: interaction.guild.name, inline: true },
-                    { name: '❓ Why leaving?', value: reason },
-                    { name: '💡 What could be better?', value: improve }
-                )
-                .setTimestamp();
-
-            await logChannel.send({ embeds: [logEmbed] });
-            console.log('✅ Exit survey logged');
+            if (!config.logChannelId) throw new Error('No log channel configured');
+            const logChannel = await client.channels.fetch(config.logChannelId);
+            await logChannel.send({
+                embeds: [new EmbedBuilder()
+                    .setTitle('📋 Exit Survey')
+                    .setColor(0xFEE75C)
+                    .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
+                    .addFields(
+                        { name: 'User', value: `${interaction.user.tag}`, inline: true },
+                        { name: 'ID', value: `\`${interaction.user.id}\``, inline: true },
+                        { name: 'Server', value: interaction.guild.name, inline: true },
+                        { name: '❓ Why leaving?', value: reason },
+                        { name: '💡 What could be better?', value: improve }
+                    )
+                    .setTimestamp()]
+            });
         } catch (err) {
             console.error('❌ Failed to log exit survey:', err.message);
-            await discordLog('error', `Failed to log exit survey in **${interaction.guild.name}**: ${err.message}`, true);
+            await discordLog('error', `Failed to log exit survey in **${interaction.guild.name}**: ${err.message}`);
         }
 
         // Kick
         try {
-            await interaction.editReply({
-                content: '✅ Thanks for your feedback! You will now be removed from the server.'
-            });
-
+            await interaction.editReply({ content: '✅ Thanks for your feedback! You will now be removed from the server.' });
             await new Promise(r => setTimeout(r, 2000));
-
             const member = await interaction.guild.members.fetch(interaction.user.id);
             await member.kick('Exit survey completed');
-
-            console.log(`🚪 Kicked ${interaction.user.tag} from ${interaction.guild.name}`);
-            await discordLog('success', `🚪 **${interaction.user.tag}** was kicked from **${interaction.guild.name}**`, true);
+            await discordLog('success', `🚪 **${interaction.user.tag}** left **${interaction.guild.name}**`);
         } catch (err) {
             console.error('❌ Failed to kick:', err.message);
-            await discordLog('error', `Failed to kick **${interaction.user.tag}** from **${interaction.guild.name}**: ${err.message}`, true);
-            await interaction.editReply({
-                content: '❌ Something went wrong. Please contact a server admin.'
-            });
+            await discordLog('error', `Failed to kick **${interaction.user.tag}** from **${interaction.guild.name}**: ${err.message}`);
+            await interaction.editReply({ content: '❌ Something went wrong. Please contact a server admin.' });
         }
     }
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 process.on('SIGTERM', async () => {
-    console.log('🛑 Shutting down...');
-    await discordLog('warning', 'Bot is shutting down (SIGTERM)', true);
+    await discordLog('warning', 'Bot is shutting down (SIGTERM)');
     client.destroy();
     process.exit(0);
 });
 
 process.on('SIGINT', async () => {
-    console.log('🛑 Shutting down...');
-    await discordLog('warning', 'Bot is shutting down (SIGINT)', true);
+    await discordLog('warning', 'Bot is shutting down (SIGINT)');
     client.destroy();
     process.exit(0);
 });
